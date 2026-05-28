@@ -1,0 +1,66 @@
+# TumorBoard AI - Caddy 反向代理样板
+# 用法:复制到 /etc/caddy/Caddyfile,替换 mdt.inseq.top / minio.inseq.top 为你的实际域名
+# 之后 sudo systemctl reload caddy
+
+{
+    # 全局选项
+    # 联系邮箱(Let's Encrypt 用,过期前提醒)
+    email admin@inseq.top
+    # 如果 Let's Encrypt 在国内连接慢,可切 ZeroSSL:
+    # acme_ca https://acme.zerossl.com/v2/DV90
+}
+
+# ===== 前端 + 后端 API =====
+mdt.inseq.top {
+    encode gzip
+
+    # SSE 长连接 — 关 buffer + 30 min 不超时(必须)
+    @sse path /api/v1/jobs/* /api/v1/sessions/*/progress
+    handle @sse {
+        reverse_proxy localhost:8000 {
+            flush_interval -1
+            transport http {
+                read_timeout 30m
+                write_timeout 30m
+            }
+        }
+    }
+
+    # 其他后端 API
+    handle /api/* {
+        reverse_proxy localhost:8000
+    }
+
+    # 前端 Next.js(兜底)
+    handle {
+        reverse_proxy localhost:3000
+    }
+
+    # 上传容忍度(单张化验单 + 录音分片)
+    request_body {
+        max_size 200MB
+    }
+
+    log {
+        output file /var/log/caddy/mdt-access.log
+        format console
+        level INFO
+    }
+}
+
+# ===== MinIO 直传(预签名 URL)=====
+minio.inseq.top {
+    reverse_proxy localhost:9000 {
+        # MinIO 需要原始 Host header 才能验证签名
+        header_up Host {upstream_hostport}
+    }
+    # 录音整段或 PDF 可能比较大
+    request_body {
+        max_size 500MB
+    }
+    log {
+        output file /var/log/caddy/minio-access.log
+        format console
+        level WARN
+    }
+}

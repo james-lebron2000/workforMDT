@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+.next/
+out/
+.turbo/
+dist/
+
+# Env(任何路径下的 .env 系列文件,真密钥永不入库)
+.env
+.env.*
+!.env.example
+backend/.env
+frontend/.env.local
+frontend/.env.production
+*.pem
+*.key
+secrets/
+.secrets/
+
+# Data
+samples/*.mp3
+samples/*.wav
+samples/*.jpg
+samples/*.png
+samples/*.pdf
+!samples/README.md
+data/
+uploads/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Docker
+docker-compose.override.yml

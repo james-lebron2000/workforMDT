@@ -1,0 +1,35 @@
+version: "3.9"
+
+# TumorBoard AI - GPU 节点(独立机器,只跑 ASR)
+#
+# 历史:V1 这里同时跑 PaddleOCR(ocr-service);
+# V2 改为多模态 LLM 直接识图(豆包 Seed 1.6),省去 OCR GPU 依赖。
+# 如果你想恢复 V1 自部署 OCR 路径,见 ai-services/ocr-service/(代码保留)
+# 并把 docker-compose.gpu.legacy.yml 重新启用。
+#
+# 部署到 GPU 服务器后:
+#   cp .env.example .env  # 至少填 ASR 相关变量
+#   docker compose -f docker-compose.gpu.yml up -d
+
+services:
+  asr-service:
+    build:
+      context: ./ai-services/asr-service
+    restart: unless-stopped
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      MODELSCOPE_CACHE: /root/.cache/modelscope
+    volumes:
+      - funasr-cache:/root/.cache/modelscope
+    ports:
+      - "8002:8002"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+
+volumes:
+  funasr-cache:

@@ -1,0 +1,71 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --foreground-rgb: 30, 30, 30;
+  --background-rgb: 245, 247, 250;
+  /* iPhone 安全区 */
+  --safe-top: env(safe-area-inset-top);
+  --safe-bottom: env(safe-area-inset-bottom);
+}
+
+html {
+  /* iOS Safari:防输入框聚焦时整页放大 */
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  color: rgb(var(--foreground-rgb));
+  background: rgb(var(--background-rgb));
+  -webkit-font-smoothing: antialiased;
+  font-family: 'PingFang SC', 'Microsoft YaHei', 'Hiragino Sans GB', system-ui, sans-serif;
+  /* 防 iOS 整页橡皮筋滚动溢出黏在底部 */
+  overscroll-behavior-y: contain;
+}
+
+/* iOS 安全区工具类 */
+.pt-safe { padding-top: var(--safe-top); }
+.pb-safe { padding-bottom: var(--safe-bottom); }
+
+/* 输入框 — iOS 不缩放阈值是 16px,字号≥16 才不会自动放大 */
+input, textarea, select {
+  font-size: 16px;
+}
+
+/* 按钮:触摸目标 ≥ 44x44 (iOS HIG) / 48x48 (Material) */
+.btn {
+  @apply inline-flex items-center justify-center px-4 py-2.5 rounded-md font-medium transition select-none;
+  min-height: 44px;
+  touch-action: manipulation; /* 关 300ms 点击延迟 */
+}
+.btn-primary { @apply bg-brand-500 text-white hover:bg-brand-600 active:bg-brand-700 active:scale-[0.98]; }
+.btn-secondary { @apply bg-white text-brand-600 border border-brand-500 hover:bg-brand-50 active:bg-brand-100; }
+.btn-ghost { @apply text-gray-700 hover:bg-gray-100 active:bg-gray-200; }
+
+.card { @apply bg-white rounded-xl shadow-sm border border-gray-100 p-4; }
+.tag { @apply inline-flex items-center px-2 py-0.5 text-xs rounded-full; }
+.tag-pending { @apply tag bg-gray-100 text-gray-700; }
+.tag-processing { @apply tag bg-amber-100 text-amber-800; }
+.tag-done { @apply tag bg-emerald-100 text-emerald-800; }
+.tag-failed { @apply tag bg-rose-100 text-rose-700; }
+.watermark {
+  @apply text-rose-600 italic text-sm;
+}
+
+/* Sticky 底部主操作栏(upload 页用) */
+.action-bar {
+  @apply fixed left-0 right-0 bg-white/95 backdrop-blur border-t border-gray-200 px-4 py-3;
+  bottom: 0;
+  padding-bottom: calc(0.75rem + var(--safe-bottom));
+  z-index: 20;
+}
+
+/* Toast 进入动画 — 从顶部滑下渐显,临床场景刻意做得"安静",不抢医生注意 */
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-toast-in {
+  animation: toast-in 180ms ease-out;
+}

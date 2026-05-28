@@ -1,0 +1,13 @@
+"""所有 SQLAlchemy 模型 - 在这里导入,alembic autogenerate 才能扫到"""
+from models.audit import AuditLog  # noqa: F401
+from models.consent import UserConsent  # noqa: F401
+from models.opinion import DepartmentOpinion  # noqa: F401
+from models.patient import Patient  # noqa: F401
+from models.recommendation import FinalRecommendation  # noqa: F401
+from models.record import MedicalRecord  # noqa: F401
+from models.revision import FieldRevision  # noqa: F401
+from models.session import MdtSession  # noqa: F401
+from models.summary import CaseSummary  # noqa: F401
+from models.tnm import TnmStaging  # noqa: F401
+from models.user import User  # noqa: F401
+from models.voice import VoiceNote  # noqa: F401
