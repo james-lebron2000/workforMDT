@@ -19,6 +19,13 @@ logger = structlog.get_logger()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("startup", env=settings.app_env, llm_provider=settings.llm_provider)
+    # 确保 MinIO bucket 存在 + 生命周期策略已配置(否则首次上传 NoSuchBucket)
+    try:
+        from services.minio_client import ensure_bucket
+        ensure_bucket()
+    except Exception as e:
+        # 启动期 MinIO 不可用,降级到运行时再试 — 不阻塞进程启动(否则 readyz 撞死锁)
+        logger.warning("minio_bucket_init_skip", error=str(e))
     yield
     logger.info("shutdown")
 
