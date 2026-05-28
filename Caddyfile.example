@@ -31,9 +31,9 @@ mdt.inseq.top {
         reverse_proxy localhost:8000
     }
 
-    # 前端 Next.js(兜底)
+    # 前端 Next.js(兜底)— host 3001 因为 3000 经常被其他 Node 应用占用
     handle {
-        reverse_proxy localhost:3000
+        reverse_proxy localhost:3001
     }
 
     # 上传容忍度(单张化验单 + 录音分片)

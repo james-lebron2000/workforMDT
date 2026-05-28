@@ -1,7 +1,13 @@
-version: "3.9"
-
 # TumorBoard AI - 业务节点(本机)
 # GPU 节点(ai-services/)单独起,见 docker-compose.gpu.yml
+#
+# 端口策略(避免与同台机器上其他服务冲突):
+#   - postgres / redis 不暴露到 host(只在 docker 内网用,被 backend / worker 调用)
+#   - backend  :8000 → Caddy 反代为 https://mdt.<your-domain>/api/*
+#   - frontend :3001 → Caddy 反代为 https://mdt.<your-domain>/
+#                       (3000 经常被其他 Node 应用占,故 3001)
+#   - minio    :9000 / 9001 → 9000 直传(对应 https://minio.<your-domain>)
+#                              9001 是管理控制台(本地访问,默认不暴露公网)
 
 services:
   postgres:
@@ -13,8 +19,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
     volumes:
       - pgdata:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
+    # 不暴露到 host — 只 docker 内网用
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tumorboard}"]
       interval: 5s
@@ -27,8 +32,7 @@ services:
     command: redis-server --appendonly yes
     volumes:
       - redisdata:/data
-    ports:
-      - "6379:6379"
+    # 不暴露到 host — 只 docker 内网用
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -129,13 +133,17 @@ services:
   frontend:
     build:
       context: ./frontend
+      # 把构建期变量传进去(Next.js 是 build-time 注入)
+      args:
+        NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://backend:8000}
     restart: unless-stopped
     environment:
       NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://backend:8000}
     depends_on:
       - backend
     ports:
-      - "3000:3000"
+      # host 3001 → container 3000(host:3000 经常被其他 Node 应用占用)
+      - "3001:3000"
 
 volumes:
   pgdata:
