@@ -31,6 +31,11 @@ mdt.inseq.top {
         reverse_proxy localhost:8000
     }
 
+    # 健康检查 — 后端 /health 和 /health/deep(/diagnostics 页面会调 /health/deep)
+    handle /health* {
+        reverse_proxy localhost:8000
+    }
+
     # 前端 Next.js(兜底)— host 3001 因为 3000 经常被其他 Node 应用占用
     handle {
         reverse_proxy localhost:3001
