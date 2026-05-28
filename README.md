@@ -268,9 +268,10 @@ docker compose logs -f backend
 ```bash
 dig mdt.<your-domain> +short                                # DNS 通了
 curl -I https://mdt.<your-domain>                           # HTTPS OK
-curl https://mdt.<your-domain>/api/v1/health                # backend 活着
+curl https://mdt.<your-domain>/health                       # backend 活着(浅)
+curl https://mdt.<your-domain>/health/deep | jq             # PG/Redis/MinIO/LLM/火山 全绿
 curl -I https://minio.<your-domain>/minio/health/live       # MinIO OK
-# 浏览器开 https://mdt.<your-domain>/diagnostics — 5 项全绿
+# 浏览器开 https://mdt.<your-domain>/diagnostics — 7 项全绿(网络/后端/麦克风/编码/WakeLock/IndexedDB/浏览器)
 ```
 
 ### 7. Day-0 Operations
