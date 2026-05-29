@@ -16,10 +16,18 @@ import { useToast } from '@/components/Toast'
 type VoiceType = 'patient_request' | 'mdt_discussion'
 
 interface RecorderProps {
-  sessionId: string
-  voiceType: VoiceType
+  /** Session 模式:这次录音绑定到单个 session(原有用法) */
+  sessionId?: string
+  voiceType?: VoiceType
+  /** Meeting 模式:整段群组录音,后端预生成 voice_id,前端只负责上传分片 + finalize */
+  meetingId?: string
+  presetVoiceId?: string
   label: string
   chunkSeconds?: number
+  /**
+   * session 模式:回调收 voice_id
+   * meeting 模式:回调时已 finalize(mp3 拼好),由父组件决定何时调 /finalize 触发 ASR+切分
+   */
   onFinished?: (voiceId: string) => void
 }
 
@@ -49,10 +57,17 @@ const RETRY_BACKOFF_MS = [1500, 3000, 6000]
 export default function Recorder({
   sessionId,
   voiceType,
+  meetingId,
+  presetVoiceId,
   label,
   chunkSeconds = 90,
   onFinished,
 }: RecorderProps) {
+  const isMeeting = Boolean(meetingId)
+  // 在 meeting 模式下,virtual sessionId 用于 IndexedDB 路径隔离;真正上传走 meeting 端点
+  const storageSessionId = sessionId || (meetingId ? `meeting-${meetingId}` : '')
+  const storageVoiceType: VoiceType =
+    voiceType || (isMeeting ? 'mdt_discussion' : 'patient_request')
   const toast = useToast()
   const [recording, setRecording] = useState(false)
   const [elapsed, setElapsed] = useState(0)
@@ -84,8 +99,9 @@ export default function Recorder({
 
   // mount 时:看 IndexedDB 里这个 session+voiceType 是否有未上传的片
   useEffect(() => {
+    if (!storageSessionId) return
     let cancelled = false
-    listOrphansForSession(sessionId, voiceType)
+    listOrphansForSession(storageSessionId, storageVoiceType)
       .then((groups) => {
         if (cancelled) return
         if (groups.length > 0) {
@@ -98,7 +114,7 @@ export default function Recorder({
     return () => {
       cancelled = true
     }
-  }, [sessionId, voiceType])
+  }, [storageSessionId, storageVoiceType])
 
   // visibilitychange 时若 WakeLock 被系统释放,尝试重新申请(iOS Safari 会丢)
   useEffect(() => {
@@ -173,12 +189,20 @@ export default function Recorder({
 
   async function ensureVoice(mime: string): Promise<string> {
     if (voiceIdRef.current) return voiceIdRef.current
+    // Meeting 模式:voice_id 在 /api/v1/mdt-meetings POST 时就由后端预生成,直接用 presetVoiceId
+    if (isMeeting) {
+      if (!presetVoiceId) throw new Error('meeting 模式需要 presetVoiceId(由后端在创建 meeting 时返回)')
+      voiceIdRef.current = presetVoiceId
+      setVoiceId(presetVoiceId)
+      return presetVoiceId
+    }
+    if (!sessionId) throw new Error('session 模式需要 sessionId')
     const ext = extFromMime(mime)
-    const filename = `${voiceType}-${Date.now()}.${ext}`
+    const filename = `${storageVoiceType}-${Date.now()}.${ext}`
     const { voice_id } = await api.presignVoice({
       session_id: sessionId,
       filename,
-      voice_type: voiceType,
+      voice_type: storageVoiceType,
     })
     voiceIdRef.current = voice_id
     setVoiceId(voice_id)
@@ -211,14 +235,20 @@ export default function Recorder({
 
     try {
       const form = new FormData()
-      form.append('session_id', sessionId)
       form.append('voice_id', vid)
       form.append('chunk_index', String(index))
       // 上报 mime,后端 chunk0 时落库,finalize 据此决定 ffmpeg 输入容器
       form.append('mime', mime)
       const ext = extFromMime(mime)
       form.append('file', blob, `chunk-${index}.${ext}`)
-      const res = await fetch(`${BASE}/api/v1/audio/chunk`, {
+      let endpoint: string
+      if (isMeeting) {
+        endpoint = `${BASE}/api/v1/mdt-meetings/${meetingId}/voice/chunk`
+      } else {
+        form.append('session_id', sessionId!)
+        endpoint = `${BASE}/api/v1/audio/chunk`
+      }
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'X-Device-Id': getDeviceId() },
         body: form,
@@ -267,8 +297,8 @@ export default function Recorder({
     try {
       await saveChunk({
         voiceId: vid,
-        sessionId,
-        voiceType,
+        sessionId: storageSessionId,
+        voiceType: storageVoiceType,
         chunkIndex: idx,
         mime,
         blob,
@@ -457,29 +487,45 @@ export default function Recorder({
     setError(null)
     try {
       const chunkCount = chunkIndexRef.current
-      const res = await fetch(`${BASE}/api/v1/audio/finalize`, {
+      let endpoint: string
+      let body: any
+      if (isMeeting) {
+        endpoint = `${BASE}/api/v1/mdt-meetings/${meetingId}/voice/upload-finalize`
+        body = {
+          voice_id: voiceIdRef.current,
+          chunk_count: chunkCount,
+          source_mime: mimeRef.current || recordedMime,
+        }
+      } else {
+        endpoint = `${BASE}/api/v1/audio/finalize`
+        body = {
+          session_id: sessionId,
+          voice_id: voiceIdRef.current,
+          chunk_count: chunkCount,
+          source_mime: mimeRef.current || recordedMime,
+        }
+      }
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'X-Device-Id': getDeviceId(),
         },
-        body: JSON.stringify({
-          session_id: sessionId,
-          voice_id: voiceIdRef.current,
-          chunk_count: chunkCount,
-          source_mime: mimeRef.current || recordedMime,
-        }),
+        body: JSON.stringify(body),
       })
       if (!res.ok) {
-        const body = await res.text().catch(() => '')
-        throw new Error(`HTTP ${res.status}: ${body || '后端拼接转码失败'}`)
+        const errText = await res.text().catch(() => '')
+        throw new Error(`HTTP ${res.status}: ${errText || '后端拼接转码失败'}`)
       }
       // finalize 成功:清空本地 IndexedDB
       try {
         await clearVoice(voiceIdRef.current)
       } catch {}
-      // 触发 ASR
-      await api.triggerAsr(voiceIdRef.current)
+      if (!isMeeting) {
+        // 单 session 模式:立即触发 ASR
+        await api.triggerAsr(voiceIdRef.current)
+      }
+      // meeting 模式:父组件决定何时调 /finalize 触发 ASR+切分(可能需要二次确认)
       onFinished?.(voiceIdRef.current)
     } catch (e: any) {
       const msg = e?.message || String(e)

@@ -15,7 +15,9 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from config import settings
+from models.meeting import MdtMeeting, mdt_meeting_sessions
 from models.opinion import DepartmentOpinion
+from models.patient import Patient
 from models.record import MedicalRecord
 from models.recommendation import FinalRecommendation
 from models.session import MdtSession
@@ -553,6 +555,11 @@ def mdt_analysis_task(self, session_id: str) -> Dict[str, Any]:
                 f"分析完成,QC {fr.qc_status}",
                 qc_issues=len(qc_report.issues),
             )
+
+            # 群组会议收尾:若本 session 隶属某 meeting,检查兄弟 session 是否全部 reviewing/completed,
+            # 是则把 meeting.status 推到 completed,并往 meeting 的 SSE channel 发"已全部完成"
+            _maybe_complete_meeting_for_session(db, session_id)
+
             return {
                 "ok": True,
                 "qc_status": fr.qc_status,
@@ -571,6 +578,286 @@ def mdt_analysis_task(self, session_id: str) -> Dict[str, Any]:
                 tb=traceback.format_exc()[-800:],
             )
             _publish(session_id, "analyze", -1, f"分析失败: {e}")
+            try:
+                raise self.retry(exc=e)
+            except self.MaxRetriesExceededError:
+                return {"ok": False, "error": str(e)}
+
+
+# ============================================================
+# 群组 MDT 会议:整段录音 → ASR → 语义切分 → 各 session 排队分析
+# ============================================================
+
+
+def _publish_meeting(meeting_id: str, stage: str, percent: int, message: str, **extra: Any):
+    """SSE 复用同一 channel,UUID 不冲突。"""
+    try:
+        sse_publisher.publish(meeting_id, stage, percent, message, extra=extra or None)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("publish_meeting_failed", error=str(e))
+
+
+def _maybe_complete_meeting_for_session(db: Session, session_id: str) -> None:
+    """单个 session 7-agent 跑完后,检查所属 meeting 的所有 sibling 是否齐全。
+
+    判定:meeting 下每个有 mdt_discussion(说明 splitter 分到了发言)的 session,
+    若都已进入 reviewing/completed,则推 meeting.status = completed。
+    没分到发言(is_missing)的 session 不参与判定 — 它们本就被跳过分析。
+    """
+    try:
+        # 找出本 session 在哪个 meeting 里(可能不在)
+        meeting_id_row = db.execute(
+            select(mdt_meeting_sessions.c.meeting_id).where(
+                mdt_meeting_sessions.c.session_id == session_id
+            )
+        ).first()
+        if not meeting_id_row:
+            return
+        meeting_id = meeting_id_row[0]
+        meeting = db.get(MdtMeeting, meeting_id)
+        if meeting is None or meeting.status == "completed":
+            return
+
+        # 所有兄弟 session
+        sibling_ids = [
+            row[0]
+            for row in db.execute(
+                select(mdt_meeting_sessions.c.session_id).where(
+                    mdt_meeting_sessions.c.meeting_id == meeting_id
+                )
+            ).all()
+        ]
+        if not sibling_ids:
+            return
+
+        # 哪些 session 实际分到了发言 — 用 split_summary 反查(is_missing != true)
+        with_segments = {
+            entry["session_id"]
+            for entry in (meeting.split_summary or [])
+            if entry.get("is_missing") is not True and entry.get("segment_count", 0) > 0
+        }
+        # split_summary 缺时退化为"凡 status 不是 draft/collecting 的都算":更宽松,只是为了避免阻塞
+        if not with_segments:
+            with_segments = set(sibling_ids)
+
+        statuses = {
+            sid: status
+            for sid, status in db.execute(
+                select(MdtSession.id, MdtSession.status).where(
+                    MdtSession.id.in_(list(with_segments))
+                )
+            ).all()
+        }
+        all_done = all(
+            statuses.get(sid) in ("reviewing", "completed") for sid in with_segments
+        )
+        if all_done:
+            meeting.status = "completed"
+            db.commit()
+            _publish_meeting(
+                meeting_id,
+                "meeting",
+                100,
+                f"全部 {len(with_segments)} 位患者已分析完成,可逐一查看报告",
+            )
+    except Exception as e:  # noqa: BLE001
+        # 收尾失败不影响主流程
+        logger.warning("meeting_complete_check_failed", error=str(e), session_id=session_id)
+
+
+@shared_task(name="tasks.meeting_analyze_task", bind=True, max_retries=1, default_retry_delay=30)
+def meeting_analyze_task(self, meeting_id: str) -> Dict[str, Any]:
+    """群组 MDT 主流程(整段录音 → 切分 → 各 session 7-agent 串联)。
+
+    步骤:
+    1. 取出 group voice → ASR 整段(火山豆包音频理解)
+    2. 调 agent_08_meeting_splitter → 按 session_id 拆 transcript
+    3. 为每个 session 新建/更新一条 mdt_discussion VoiceNote(asr_status=done,transcript=子片段)
+    4. 给每个 session 排队 mdt_analysis_task(异步并行)
+    5. meeting.status = 'analyzing' → 各 session 完成由各自 mdt_analysis_task 推自己的 SSE
+       (前端订阅 meeting SSE 时同时订阅各 session SSE 来汇总进度)
+    """
+    from agents.agent_08_meeting_splitter import UNASSIGNED, run_meeting_splitter
+    from schemas.meeting import MeetingCandidate
+
+    with SyncSession() as db:
+        meeting: MdtMeeting | None = db.get(MdtMeeting, meeting_id)
+        if meeting is None:
+            return {"ok": False, "error": "meeting_not_found"}
+        if not meeting.group_voice_id:
+            meeting.status = "failed"
+            meeting.error = "未找到群组录音"
+            db.commit()
+            _publish_meeting(meeting_id, "meeting", -1, "未找到群组录音")
+            return {"ok": False, "error": "no_group_voice"}
+
+        voice: VoiceNote | None = db.get(VoiceNote, meeting.group_voice_id)
+        if voice is None or voice.file_key.endswith("placeholder.bin"):
+            meeting.status = "failed"
+            meeting.error = "录音文件尚未拼接完成"
+            db.commit()
+            _publish_meeting(meeting_id, "meeting", -1, "录音文件未拼接")
+            return {"ok": False, "error": "voice_not_finalized"}
+
+        try:
+            # Step 1: ASR 整段
+            _publish_meeting(meeting_id, "meeting", 5, "整段 ASR 中(可能需要 1-3 分钟)")
+            meeting.status = "transcribing"
+            voice.asr_status = "processing"
+            db.commit()
+
+            audio_bytes = minio_client.get_object_bytes(voice.file_key)
+            hotwords = _load_hotwords()
+            from config import settings as _settings
+
+            if (_settings.asr_provider or "volcengine").lower() == "funasr":
+                asr_result = infer_client.asr_transcribe(
+                    audio_bytes,
+                    filename=voice.file_key,
+                    hotwords=hotwords,
+                    enable_diarization=True,
+                )
+            else:
+                from services import volcengine_audio
+
+                asr_result = volcengine_audio.transcribe(
+                    audio_bytes,
+                    filename=voice.file_key,
+                    voice_type="mdt_discussion",
+                    hotwords=hotwords,
+                    enable_diarization=True,
+                )
+            segments = asr_result.get("segments", []) or []
+            voice.transcript = segments
+            voice.duration = asr_result.get("duration")
+            voice.asr_status = "done"
+            db.commit()
+            _publish_meeting(
+                meeting_id,
+                "meeting",
+                40,
+                f"ASR 完成({len(segments)} 段),开始按患者语义切分",
+            )
+
+            # Step 2: 候选 session 元数据
+            rows = list(
+                db.execute(
+                    select(MdtSession, Patient)
+                    .join(
+                        mdt_meeting_sessions,
+                        mdt_meeting_sessions.c.session_id == MdtSession.id,
+                    )
+                    .join(Patient, MdtSession.patient_id == Patient.id)
+                    .where(mdt_meeting_sessions.c.meeting_id == meeting_id)
+                    .order_by(MdtSession.created_at)
+                ).all()
+            )
+            candidates = [
+                MeetingCandidate(
+                    session_id=s.id,
+                    patient_code=p.code,
+                    primary_diagnosis=p.primary_diagnosis,
+                    primary_site=p.primary_site,
+                )
+                for s, p in rows
+            ]
+
+            meeting.status = "splitting"
+            db.commit()
+            split_result = run_meeting_splitter(segments, candidates)
+            splits = split_result["splits"]
+            summary = split_result["summary"]
+
+            # Step 3: 把切分结果落到各 session 的新 voice_note
+            n_with_segments = 0
+            for c in candidates:
+                sub = splits.get(c.session_id, [])
+                sub_dicts = [
+                    seg.model_dump() if hasattr(seg, "model_dump") else seg
+                    for seg in sub
+                ]
+                if not sub_dicts:
+                    # 这位患者没被讨论 — 跳过创建空 voice_note,避免下游 analyze 报"无 mdt_discussion"
+                    continue
+                n_with_segments += 1
+                sub_voice = VoiceNote(
+                    session_id=c.session_id,
+                    meeting_id=meeting_id,
+                    file_key=voice.file_key,  # 共享同一个 mp3,节省存储
+                    voice_type="mdt_discussion",
+                    duration=voice.duration,
+                    chunk_count=1,
+                    asr_status="done",
+                    transcript=sub_dicts,
+                )
+                db.add(sub_voice)
+                # 推动 session 状态(允许 draft/collecting 也可分析,红线已松)
+                s_obj = db.get(MdtSession, c.session_id)
+                if s_obj is not None and s_obj.status in (
+                    "draft",
+                    "collecting",
+                    "summary_confirmed",
+                    "recording",
+                ):
+                    s_obj.status = "analyzing"
+
+            meeting.split_summary = summary
+            db.commit()
+            _publish_meeting(
+                meeting_id,
+                "meeting",
+                70,
+                f"切分完成({n_with_segments}/{len(candidates)} 位患者有发言),触发各自分析",
+                splits=summary,
+            )
+
+            # Step 4: 给每个有发言的 session 排队 mdt_analysis_task
+            if n_with_segments == 0:
+                meeting.status = "failed"
+                meeting.error = (
+                    "切分后所有候选患者均无明确发言。请检查候选列表是否正确,或重录。"
+                )
+                db.commit()
+                _publish_meeting(
+                    meeting_id, "meeting", -1, meeting.error
+                )
+                return {"ok": False, "error": "all_candidates_missing"}
+
+            meeting.status = "analyzing"
+            db.commit()
+            for c in candidates:
+                if not splits.get(c.session_id):
+                    continue
+                celery_app.send_task(
+                    "tasks.mdt_analysis_task", args=[c.session_id], queue="mdt"
+                )
+
+            _publish_meeting(
+                meeting_id,
+                "meeting",
+                100,
+                "切分完成,各患者分析已排队;请订阅各 session 进度查看明细",
+            )
+            return {
+                "ok": True,
+                "n_candidates": len(candidates),
+                "n_with_segments": n_with_segments,
+            }
+
+        except Exception as e:  # noqa: BLE001
+            db.rollback()
+            m2 = db.get(MdtMeeting, meeting_id)
+            if m2 is not None:
+                m2.status = "failed"
+                m2.error = str(e)[:1000]
+                db.commit()
+            logger.error(
+                "meeting_analyze_failed",
+                meeting_id=meeting_id,
+                error=str(e),
+                tb=traceback.format_exc()[-800:],
+            )
+            _publish_meeting(meeting_id, "meeting", -1, f"会议分析失败: {e}")
             try:
                 raise self.retry(exc=e)
             except self.MaxRetriesExceededError:

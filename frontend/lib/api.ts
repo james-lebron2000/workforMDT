@@ -81,6 +81,29 @@ export function humanizeError(e: unknown): string {
   return msg
 }
 
+export interface MeetingMember {
+  session_id: string
+  patient_code: string
+  primary_diagnosis: string | null
+  primary_site: string | null
+  session_status: string
+  has_summary_confirmed: boolean
+  split_segment_count: number | null
+  split_confidence: number | null
+  split_is_missing: boolean | null
+}
+
+export interface MeetingDetail {
+  id: string
+  title: string | null
+  mdt_date: string | null
+  status: string  // draft | recording | transcribing | splitting | analyzing | completed | failed
+  group_voice_id: string | null
+  audio_finalized: boolean  // mp3 已拼接转码完成,可触发 ASR+切分
+  members: MeetingMember[]
+  error: string | null
+}
+
 export const api = {
   base: BASE,
   async getConsent() {
@@ -237,6 +260,41 @@ export const api = {
     if (!res.ok) throw new Error(await res.text())
     if (format === 'wechat_card') return (await res.json()) as { ok: boolean; card: string }
     return res.blob()
+  },
+  // ---------- 群组 MDT 会议(多病人单录音 → AI 切分) ----------
+  async createMeeting(payload: {
+    session_ids: string[]
+    title?: string
+    mdt_date?: string
+  }) {
+    const res = await fetch(`${BASE}/api/v1/mdt-meetings`, {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify(payload),
+    })
+    return unwrap<MeetingDetail>(res)
+  },
+  async listMeetings() {
+    const res = await fetch(`${BASE}/api/v1/mdt-meetings`, { headers: headers() })
+    return unwrap<{ meetings: MeetingDetail[] }>(res)
+  },
+  async getMeeting(id: string) {
+    const res = await fetch(`${BASE}/api/v1/mdt-meetings/${id}`, { headers: headers() })
+    return unwrap<MeetingDetail>(res)
+  },
+  async deleteMeeting(id: string) {
+    const res = await fetch(`${BASE}/api/v1/mdt-meetings/${id}`, {
+      method: 'DELETE',
+      headers: headers(),
+    })
+    return unwrap<{ ok: boolean; minio_files_removed: number }>(res)
+  },
+  async finalizeMeetingAnalyze(id: string) {
+    const res = await fetch(`${BASE}/api/v1/mdt-meetings/${id}/finalize`, {
+      method: 'POST',
+      headers: headers(),
+    })
+    return unwrap<{ ok: boolean; task_id: string; meeting_id: string }>(res)
   },
   // MDT 会前摘要 PDF — 仅在 status >= summary_confirmed 时可调
   async exportBrief(sessionId: string) {

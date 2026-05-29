@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from config import settings
-from routers import audio, auth, consent, files, jobs, report, sessions
+from routers import audio, auth, consent, files, jobs, meetings, report, sessions
 
 logging.basicConfig(level=logging.INFO)
 logger = structlog.get_logger()
@@ -135,4 +135,5 @@ app.include_router(sessions.router, prefix=f"{PREFIX}/sessions", tags=["sessions
 app.include_router(files.router, prefix=f"{PREFIX}/files", tags=["files"])
 app.include_router(audio.router, prefix=f"{PREFIX}/audio", tags=["audio"])
 app.include_router(jobs.router, prefix=f"{PREFIX}/jobs", tags=["jobs"])
+app.include_router(meetings.router, prefix=f"{PREFIX}/mdt-meetings", tags=["meetings"])
 app.include_router(report.router, prefix=f"{PREFIX}/report", tags=["report"])

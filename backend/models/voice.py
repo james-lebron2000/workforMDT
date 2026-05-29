@@ -19,8 +19,12 @@ class VoiceNote(Base, IdMixin, TimestampMixin):
         String(36), ForeignKey("mdt_sessions.id"), nullable=False, index=True
     )
     file_key: Mapped[str] = mapped_column(String(512), nullable=False)
-    # patient_request | mdt_discussion
+    # patient_request | mdt_discussion | mdt_group_discussion(整段群组录音原始件)
     voice_type: Mapped[str] = mapped_column(String(32), default="patient_request")
+    # 群组会议关联(整段录音/各 session 的切分回写都打上同一个 meeting_id 便于追溯)
+    meeting_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("mdt_meetings.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     duration: Mapped[Optional[float]] = mapped_column(Float)
     # 分片合并状态
     chunk_count: Mapped[int] = mapped_column(Integer, default=1)

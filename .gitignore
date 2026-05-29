@@ -15,6 +15,7 @@ node_modules/
 out/
 .turbo/
 dist/
+*.tsbuildinfo
 
 # Env(任何路径下的 .env 系列文件,真密钥永不入库)
 .env

@@ -1,7 +1,12 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { subscribeProgress, ProgressEvent, ConnectionState } from '@/lib/sse'
+import {
+  subscribeProgress,
+  subscribeMeetingProgress,
+  ProgressEvent,
+  ConnectionState,
+} from '@/lib/sse'
 
 const STATE_LABEL: Record<ConnectionState, { text: string; cls: string }> = {
   connecting: { text: '连接中…', cls: 'text-gray-400' },
@@ -11,26 +16,37 @@ const STATE_LABEL: Record<ConnectionState, { text: string; cls: string }> = {
   failed: { text: '连接失败,请刷新页面', cls: 'text-rose-600' },
 }
 
-export default function ProgressStream({ sessionId }: { sessionId: string }) {
+export default function ProgressStream({
+  sessionId,
+  meetingId,
+}: {
+  sessionId?: string
+  meetingId?: string
+}) {
   const [events, setEvents] = useState<ProgressEvent[]>([])
   const [state, setState] = useState<ConnectionState>('connecting')
   const [attempt, setAttempt] = useState(0)
 
   useEffect(() => {
-    const unsub = subscribeProgress(sessionId, {
-      onMessage: (ev) => {
+    const handlers = {
+      onMessage: (ev: ProgressEvent) => {
         setEvents((prev) => {
           const next = [...prev, ev]
           return next.slice(-30)
         })
       },
-      onState: (s, n) => {
+      onState: (s: ConnectionState, n: number) => {
         setState(s)
         setAttempt(n)
       },
-    })
+    }
+    const unsub = meetingId
+      ? subscribeMeetingProgress(meetingId, handlers)
+      : sessionId
+      ? subscribeProgress(sessionId, handlers)
+      : () => {}
     return unsub
-  }, [sessionId])
+  }, [sessionId, meetingId])
 
   const latest = events[events.length - 1]
   const stateInfo = STATE_LABEL[state]

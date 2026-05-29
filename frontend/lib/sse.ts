@@ -33,6 +33,35 @@ export function subscribeProgress(
     | ((ev: ProgressEvent) => void),
   legacyOnError?: (e: any) => void,
 ): () => void {
+  return subscribeUrl(
+    `/api/v1/sessions/${sessionId}/progress`,
+    optsOrOnMessage,
+    legacyOnError,
+  )
+}
+
+/** 群组 MDT 会议进度 — channel = meeting_id(UUID 不会撞 session_id) */
+export function subscribeMeetingProgress(
+  meetingId: string,
+  optsOrOnMessage:
+    | SubscribeOptions
+    | ((ev: ProgressEvent) => void),
+  legacyOnError?: (e: any) => void,
+): () => void {
+  return subscribeUrl(
+    `/api/v1/mdt-meetings/${meetingId}/progress`,
+    optsOrOnMessage,
+    legacyOnError,
+  )
+}
+
+function subscribeUrl(
+  basePath: string,
+  optsOrOnMessage:
+    | SubscribeOptions
+    | ((ev: ProgressEvent) => void),
+  legacyOnError?: (e: any) => void,
+): () => void {
   // 兼容老签名:subscribeProgress(id, onMessage, onError)
   const opts: SubscribeOptions =
     typeof optsOrOnMessage === 'function'
@@ -44,7 +73,7 @@ export function subscribeProgress(
   let attempt = 0
   let retryTimer: number | null = null
 
-  const url = `/api/v1/sessions/${sessionId}/progress?device_id=${encodeURIComponent(getDeviceId())}`
+  const url = `${basePath}?device_id=${encodeURIComponent(getDeviceId())}`
 
   function connect() {
     if (closedByUser) return

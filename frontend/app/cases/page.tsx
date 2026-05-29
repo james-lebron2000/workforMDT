@@ -18,6 +18,7 @@ interface SessionItem {
 const STATUS_LABEL: Record<string, string> = {
   draft: '草稿',
   collecting: '资料收集中',
+  summary_confirmed: '病史已核对',
   recording: '录音中',
   analyzing: '分析中',
   reviewing: '待医生确认',
@@ -30,6 +31,9 @@ export default function CasesPage() {
   const [list, setList] = useState<SessionItem[]>([])
   const [showCreate, setShowCreate] = useState(false)
   const [busy, setBusy] = useState(false)
+  // 群组录音多选状态
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [startingMeeting, setStartingMeeting] = useState(false)
 
   useEffect(() => {
     api.listSessions().then((d) => setList(d.sessions)).catch(console.error)
@@ -61,15 +65,72 @@ export default function CasesPage() {
     }
   }
 
+  function toggleSelect(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  function clearSelection() {
+    setSelected(new Set())
+  }
+
+  async function startGroupMeeting() {
+    if (selected.size === 0) return
+    setStartingMeeting(true)
+    try {
+      const sessionIds = list
+        .filter((s) => selected.has(s.id))
+        .map((s) => s.id)
+      // 警示:有未确认病史的 session,需医生明确允许"快路录音"
+      const unconfirmed = list.filter(
+        (s) =>
+          selected.has(s.id) &&
+          !['summary_confirmed', 'recording', 'analyzing', 'reviewing', 'completed'].includes(
+            s.status,
+          ),
+      )
+      if (unconfirmed.length > 0) {
+        const ok = confirm(
+          `选中的 ${selected.size} 位患者中,有 ${unconfirmed.length} 位还未与患者核对病史摘要:\n` +
+            unconfirmed.map((u) => `  · ${u.patient_code}`).join('\n') +
+            `\n\n点"确定"将进入快路录音 — 会后请在各病例页补做"病史已与患者确认"。\n点"取消"先回去做病史核对。`,
+        )
+        if (!ok) return
+      }
+      const today = new Date().toISOString().slice(0, 10)
+      const meeting = await api.createMeeting({
+        session_ids: sessionIds,
+        title: `MDT-${today}-${selected.size}人`,
+        mdt_date: today,
+      })
+      router.push(`/mdt/${meeting.id}/record`)
+    } catch (e: any) {
+      toast.error('创建会议失败:' + humanizeError(e))
+    } finally {
+      setStartingMeeting(false)
+    }
+  }
+
+  const hasSelection = selected.size > 0
+
   return (
     <DoctorProfileGate>
     <ConsentGate>
-    <div className="space-y-4">
+    <div className="space-y-4 pb-24">
       <div className="flex items-center justify-between">
         <h1 className="text-lg font-semibold">病例列表</h1>
         <button className="btn btn-primary" onClick={() => setShowCreate(true)}>
           + 新建 MDT
         </button>
+      </div>
+
+      <div className="text-xs text-gray-500">
+        💡 勾选多个病例 → 底部"开始 MDT 录音(N)"统一录一段会议,AI 自动按患者切分;
+        或点击单个病例进入"4 步流程"独立准备。
       </div>
 
       {list.length === 0 && (
@@ -79,32 +140,77 @@ export default function CasesPage() {
       )}
 
       <ul className="space-y-2">
-        {list.map((s) => (
-          <li
-            key={s.id}
-            className="card flex items-center justify-between cursor-pointer hover:bg-gray-50"
-            onClick={() => router.push(`/cases/${s.id}/upload`)}
-          >
-            <div>
-              <div className="font-medium">{s.title || `MDT-${s.patient_code}`}</div>
-              <div className="text-xs text-gray-500">
-                患者:{s.patient_code} · {s.mdt_date || '未排期'}
-              </div>
-            </div>
-            <span
+        {list.map((s) => {
+          const checked = selected.has(s.id)
+          return (
+            <li
+              key={s.id}
               className={
-                s.status === 'completed'
-                  ? 'tag-done'
-                  : s.status === 'analyzing' || s.status === 'recording'
-                  ? 'tag-processing'
-                  : 'tag-pending'
+                'card flex items-center gap-3 ' +
+                (checked ? 'ring-2 ring-blue-400 bg-blue-50/30' : 'hover:bg-gray-50')
               }
             >
-              {STATUS_LABEL[s.status] || s.status}
-            </span>
-          </li>
-        ))}
+              <label className="shrink-0 cursor-pointer p-1" onClick={(e) => e.stopPropagation()}>
+                <input
+                  type="checkbox"
+                  className="w-5 h-5"
+                  checked={checked}
+                  onChange={() => toggleSelect(s.id)}
+                />
+              </label>
+              <div
+                className="flex-1 min-w-0 cursor-pointer"
+                onClick={() => router.push(`/cases/${s.id}/upload`)}
+              >
+                <div className="font-medium truncate">
+                  {s.title || `MDT-${s.patient_code}`}
+                </div>
+                <div className="text-xs text-gray-500">
+                  患者:{s.patient_code} · {s.mdt_date || '未排期'}
+                </div>
+              </div>
+              <span
+                className={
+                  s.status === 'completed'
+                    ? 'tag-done'
+                    : s.status === 'analyzing' || s.status === 'recording'
+                    ? 'tag-processing'
+                    : 'tag-pending'
+                }
+              >
+                {STATUS_LABEL[s.status] || s.status}
+              </span>
+            </li>
+          )
+        })}
       </ul>
+
+      {/* 底部固定 CTA — 多选起来才显示 */}
+      {hasSelection && (
+        <div className="fixed left-0 right-0 bottom-0 bg-white border-t shadow-lg p-3 z-40">
+          <div className="max-w-3xl mx-auto flex items-center gap-2">
+            <button
+              className="btn btn-ghost min-h-12 text-sm shrink-0"
+              onClick={clearSelection}
+              disabled={startingMeeting}
+              type="button"
+            >
+              取消
+            </button>
+            <div className="text-sm text-gray-600 flex-1 text-center">
+              已选 <b className="text-blue-600">{selected.size}</b> 位患者
+            </div>
+            <button
+              className="btn btn-primary min-h-12 text-base flex-1 max-w-[200px]"
+              onClick={startGroupMeeting}
+              disabled={startingMeeting}
+              type="button"
+            >
+              {startingMeeting ? '创建中…' : `🎙️ 开始 MDT 录音 (${selected.size})`}
+            </button>
+          </div>
+        </div>
+      )}
 
       {showCreate && (
         <div

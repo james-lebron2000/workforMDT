@@ -1,6 +1,7 @@
 """所有 SQLAlchemy 模型 - 在这里导入,alembic autogenerate 才能扫到"""
 from models.audit import AuditLog  # noqa: F401
 from models.consent import UserConsent  # noqa: F401
+from models.meeting import MdtMeeting, mdt_meeting_sessions  # noqa: F401
 from models.opinion import DepartmentOpinion  # noqa: F401
 from models.patient import Patient  # noqa: F401
 from models.recommendation import FinalRecommendation  # noqa: F401
