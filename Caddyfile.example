@@ -15,7 +15,7 @@ mdt.inseq.top {
     encode gzip
 
     # SSE 长连接 — 关 buffer + 30 min 不超时(必须)
-    @sse path /api/v1/jobs/* /api/v1/sessions/*/progress
+    @sse path /api/v1/jobs/* /api/v1/sessions/*/progress /api/v1/mdt-meetings/*/progress
     handle @sse {
         reverse_proxy localhost:8000 {
             flush_interval -1
