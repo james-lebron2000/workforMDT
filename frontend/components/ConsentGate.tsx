@@ -6,8 +6,8 @@
  * 行为:
  *  - 进入受保护页面(如 /cases)时,先 GET /api/v1/consent
  *  - 如果未签或政策版本已变 → 阻断渲染,弹出全屏 modal
- *  - modal 列出 §2 中所有用户必须确认事项(强制 checkbox)
- *  - 全部勾选才能点"我已阅读并同意"
+ *  - modal 用 1 条汇总承诺 + 显眼的"完整隐私政策"链接(详情列在 docs/privacy-policy.md §2)
+ *  - 勾选承诺后才能点"我已阅读并同意"
  *  - POST /api/v1/consent 成功后渲染 children
  *
  * 红线:未签同意书的用户绝不能看到/触发任何上传、录音、AI 生成功能
@@ -19,22 +19,15 @@ interface Props {
   children: React.ReactNode
 }
 
-const REQUIRED_AFFIRMATIONS = [
-  '我承诺不在本工具中录入或上传任何可识别患者身份的真实姓名(使用化名/代号)',
-  '我承诺在拍照前遮挡病历上的姓名/身份证/手机/住址/病历号',
-  '我承诺不依赖本工具的输出做单独的临床决策,所有建议须我本人复核',
-  '我承诺不向第三方分享未经我审核的 AI 原始输出',
-  '我理解 MDT 录音(原音频)会上传到火山引擎豆包音频理解 API 做转写(服务条款约定不留存/不用于训练),转写后的脱敏文本才会进入云端 LLM 综合分析',
-  '我已征得患者及参会医生口头同意录音(MDT 开场标准告知)',
-]
+// 单条汇总承诺 — 完整 6 条医生义务详情见 docs/privacy-policy.md §2
+const AFFIRMATION =
+  '我已阅读并同意《隐私政策与使用同意书》,理解原音频会上传火山引擎转写、所有 AI 输出仅供参考须本人复核;承诺仅使用患者化名/代号,录音前已征得患者及参会医生口头同意。'
 
 export default function ConsentGate({ children }: Props) {
   const [loading, setLoading] = useState(true)
   const [accepted, setAccepted] = useState(false)
   const [policyVersion, setPolicyVersion] = useState<string>('')
-  const [checked, setChecked] = useState<boolean[]>(
-    () => Array(REQUIRED_AFFIRMATIONS.length).fill(false),
-  )
+  const [checked, setChecked] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string>('')
 
@@ -49,11 +42,9 @@ export default function ConsentGate({ children }: Props) {
       .finally(() => setLoading(false))
   }, [])
 
-  const allChecked = checked.every(Boolean)
-
   async function onAccept() {
-    if (!allChecked) {
-      setError('请逐条勾选所有承诺项')
+    if (!checked) {
+      setError('请先勾选承诺项')
       return
     }
     setSubmitting(true)
@@ -83,7 +74,7 @@ export default function ConsentGate({ children }: Props) {
         <div className="px-5 pt-5 pb-2 border-b">
           <h2 className="text-base font-semibold">隐私政策与使用同意书</h2>
           <p className="text-xs text-gray-500 mt-1">
-            版本 {policyVersion} · 继续使用前请仔细阅读并逐条确认
+            版本 {policyVersion} · 继续使用前请仔细阅读并勾选确认
           </p>
         </div>
 
@@ -95,41 +86,37 @@ export default function ConsentGate({ children }: Props) {
               需主治医师复核"水印,<strong>最终临床决策必须由您本人独立做出</strong>。
             </p>
             <p className="mt-2">
-              本工具<strong>绝不</strong>:接入医院内网 · 发送原始图片/音频到云端 ·
-              向第三方分享数据 · 用于训练任何模型。
-            </p>
-            <p className="mt-2">
-              <a
-                href="/docs/privacy-policy"
-                target="_blank"
-                className="text-blue-600 underline"
-              >
-                查看完整隐私政策(docs/privacy-policy.md)
-              </a>
+              本工具<strong>绝不</strong>:接入医院内网 · 发送原始图片/音频到第三方 ·
+              用于训练任何模型。
             </p>
           </div>
 
-          <div className="space-y-2 pt-2 border-t">
-            <div className="text-sm font-medium text-gray-800">您必须确认:</div>
-            {REQUIRED_AFFIRMATIONS.map((t, i) => (
-              <label
-                key={i}
-                className="flex gap-2 items-start text-sm text-gray-700 cursor-pointer"
-              >
-                <input
-                  type="checkbox"
-                  className="mt-1"
-                  checked={checked[i]}
-                  onChange={(e) => {
-                    const next = [...checked]
-                    next[i] = e.target.checked
-                    setChecked(next)
-                  }}
-                />
-                <span>{t}</span>
-              </label>
-            ))}
-          </div>
+          <a
+            href="/docs/privacy-policy"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="block rounded-lg border border-blue-300 bg-blue-50 px-4 py-3 hover:bg-blue-100 transition"
+          >
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium text-blue-900">
+                📄 查看完整《隐私政策与使用同意书》
+              </span>
+              <span className="text-blue-600">→</span>
+            </div>
+            <p className="text-xs text-blue-700 mt-1">
+              包含数据流向、火山引擎转写细节、6 条医生义务详情
+            </p>
+          </a>
+
+          <label className="flex gap-2 items-start text-sm text-gray-800 cursor-pointer rounded-lg border border-gray-300 px-3 py-3 hover:bg-gray-50">
+            <input
+              type="checkbox"
+              className="mt-1 w-4 h-4 shrink-0"
+              checked={checked}
+              onChange={(e) => setChecked(e.target.checked)}
+            />
+            <span className="leading-relaxed">{AFFIRMATION}</span>
+          </label>
         </div>
 
         <div className="px-5 py-3 border-t bg-gray-50 rounded-b-2xl">
@@ -137,8 +124,8 @@ export default function ConsentGate({ children }: Props) {
             <div className="text-xs text-red-600 mb-2">{error}</div>
           )}
           <button
-            className="btn btn-primary w-full"
-            disabled={!allChecked || submitting}
+            className="btn btn-primary w-full min-h-11"
+            disabled={!checked || submitting}
             onClick={onAccept}
           >
             {submitting ? '提交中…' : '我已阅读并同意'}
