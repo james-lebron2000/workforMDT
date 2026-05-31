@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 from datetime import timedelta
 from typing import BinaryIO, Optional
+from urllib.parse import urlparse
 
 from minio import Minio
 from minio.commonconfig import ENABLED, Filter
@@ -24,9 +25,11 @@ logger = get_logger("minio_client")
 
 
 _client: Optional[Minio] = None
+_client_public: Optional[Minio] = None
 
 
 def get_minio() -> Minio:
+    """内部用 — 走 docker 内网 `minio:9000`,backend/worker 操作对象。"""
     global _client
     if _client is None:
         _client = Minio(
@@ -37,6 +40,35 @@ def get_minio() -> Minio:
             region=settings.minio_region,
         )
     return _client
+
+
+def get_minio_public() -> Minio:
+    """生成 presigned URL 用 — endpoint 必须是浏览器可达的公网地址,
+    否则前端直传/下载会因 DNS 解析不到 `minio:9000` 而失败。
+
+    MinIO presigned signature 计算包含 host,所以必须用同一 host 生成 URL
+    和被浏览器访问,否则签名验证失败(SignatureDoesNotMatch)。
+    """
+    global _client_public
+    if _client_public is None:
+        parsed = urlparse(settings.minio_public_endpoint)
+        # public_endpoint 形如 "https://minio.inseq.top" 或 "http://localhost:9000"
+        host = parsed.netloc or parsed.path  # netloc 空时(无 scheme)落 path
+        secure = parsed.scheme == "https"
+        _client_public = Minio(
+            endpoint=host,
+            access_key=settings.minio_access_key,
+            secret_key=settings.minio_secret_key,
+            secure=secure,
+            region=settings.minio_region,
+        )
+        logger.info(
+            "minio_public_client_init",
+            host=host,
+            secure=secure,
+            note="presigned URLs will use this host",
+        )
+    return _client_public
 
 
 def ensure_bucket() -> None:
@@ -91,16 +123,16 @@ def session_key(session_id: str, kind: str, filename: str) -> str:
 
 
 def presigned_put(key: str, expires_minutes: int = 30) -> str:
-    """生成上传用 presigned PUT URL。"""
-    client = get_minio()
+    """生成上传用 presigned PUT URL — 必须用 public endpoint,前端浏览器直传。"""
+    client = get_minio_public()
     return client.presigned_put_object(
         settings.minio_bucket, key, expires=timedelta(minutes=expires_minutes)
     )
 
 
 def presigned_get(key: str, expires_minutes: int = 15) -> str:
-    """生成下载用 presigned GET URL(短期)。"""
-    client = get_minio()
+    """生成下载用 presigned GET URL(短期)— 必须用 public endpoint,前端浏览器下载。"""
+    client = get_minio_public()
     return client.presigned_get_object(
         settings.minio_bucket, key, expires=timedelta(minutes=expires_minutes)
     )

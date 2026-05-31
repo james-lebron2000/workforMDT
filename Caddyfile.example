@@ -55,10 +55,12 @@ mdt.inseq.top {
 
 # ===== MinIO 直传(预签名 URL)=====
 minio.inseq.top {
-    reverse_proxy localhost:9000 {
-        # MinIO 需要原始 Host header 才能验证签名
-        header_up Host {upstream_hostport}
-    }
+    # ⚠️ 必须透传客户端 Host(`minio.inseq.top`),因为 MinIO presigned 签名计算
+    # 包含 host;backend 用 MINIO_PUBLIC_ENDPOINT=https://minio.inseq.top 生成
+    # 签名 host=minio.inseq.top,浏览器 PUT/GET 到 Caddy 时 Host 也是它。Caddy
+    # 默认就透传 Host,不要加 `header_up Host {upstream_hostport}` —— 会改成
+    # `localhost:9000` 导致 SignatureDoesNotMatch,上传失败。
+    reverse_proxy localhost:9000
     # 录音整段或 PDF 可能比较大
     request_body {
         max_size 500MB
