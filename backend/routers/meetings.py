@@ -39,7 +39,7 @@ from routers.consent import require_consent
 from services import minio_client
 from services.audio_transcode import TranscodeError, transcode_to_mp3
 from services.celery_app import celery_app
-from services.sse_publisher import subscribe
+from services.sse_publisher import publish, subscribe
 from utils.logger import get_logger
 
 logger = get_logger("router.meetings")
@@ -379,6 +379,13 @@ async def upload_meeting_chunk(
     chunk_bytes = await file.read()
     key = _meeting_voice_key(meeting_id, voice_id, f"chunk-{chunk_index:04d}.bin")
     minio_client.put_object(key, chunk_bytes, content_type="application/octet-stream")
+    publish(
+        meeting_id,
+        "upload",
+        10,
+        f"群组录音第 {chunk_index + 1} 片已上传 ({len(chunk_bytes) / 1024 / 1024:.1f} MB)",
+        {"voice_id": voice_id, "chunk_index": chunk_index, "size": len(chunk_bytes)},
+    )
 
     # chunk0 时落 mime
     if mime and chunk_index == 0:
@@ -435,6 +442,13 @@ async def finalize_meeting_voice(
             ) from e
     raw_bytes = merged.getvalue()
     src_mime = payload.source_mime or voice.source_mime or ""
+    publish(
+        meeting_id,
+        "upload",
+        60,
+        f"群组录音已收到 {payload.chunk_count} 片,正在合并转码",
+        {"voice_id": payload.voice_id, "chunk_count": payload.chunk_count},
+    )
 
     try:
         mp3_bytes = transcode_to_mp3(raw_bytes, src_mime=src_mime)
@@ -448,6 +462,13 @@ async def finalize_meeting_voice(
         meeting_id, payload.voice_id, f"{payload.voice_id}.mp3"
     )
     minio_client.put_object(final_key, mp3_bytes, content_type="audio/mpeg")
+    publish(
+        meeting_id,
+        "upload",
+        90,
+        f"群组录音转码完成 ({len(mp3_bytes) / 1024 / 1024:.1f} MB),可开始 AI 切分",
+        {"voice_id": payload.voice_id, "mp3_size": len(mp3_bytes)},
+    )
     voice.file_key = final_key
     voice.chunk_count = payload.chunk_count
     if src_mime and not voice.source_mime:
@@ -505,6 +526,13 @@ async def finalize_meeting(
 
     task = celery_app.send_task(
         "tasks.meeting_analyze_task", args=[meeting_id], queue="mdt"
+    )
+    publish(
+        meeting_id,
+        "meeting",
+        1,
+        "群组录音分析任务已提交,等待后台处理",
+        {"task_id": task.id, "voice_id": meeting.group_voice_id},
     )
     return {"ok": True, "task_id": task.id, "meeting_id": meeting_id}
 

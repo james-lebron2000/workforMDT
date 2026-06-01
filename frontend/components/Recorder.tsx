@@ -37,6 +37,7 @@ interface ChunkRecord {
   bytes: number
   attempts: number
   mime: string
+  uploadedBytes: number
 }
 
 const BASE = process.env.NEXT_PUBLIC_API_BASE || ''
@@ -77,6 +78,7 @@ export default function Recorder({
   const [error, setError] = useState<string | null>(null)
   const [recordedMime, setRecordedMime] = useState<string>('')
   const [wakeLockActive, setWakeLockActive] = useState(false)
+  const [phase, setPhase] = useState<string>('等待录音')
   // 恢复未传完的旧录音
   const [orphans, setOrphans] = useState<OrphanGroup[]>([])
   const [recovering, setRecovering] = useState(false)
@@ -187,6 +189,31 @@ export default function Recorder({
     return 'bin'
   }
 
+  function uploadForm(
+    endpoint: string,
+    form: FormData,
+    onProgress: (loaded: number, total: number) => void,
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest()
+      xhr.open('POST', endpoint)
+      xhr.setRequestHeader('X-Device-Id', getDeviceId())
+      xhr.upload.onprogress = (ev) => {
+        if (ev.lengthComputable) onProgress(ev.loaded, ev.total)
+      }
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve()
+          return
+        }
+        reject(new Error(`HTTP ${xhr.status}: ${xhr.responseText || '上传失败'}`))
+      }
+      xhr.onerror = () => reject(new Error('网络连接失败'))
+      xhr.onabort = () => reject(new Error('上传已取消'))
+      xhr.send(form)
+    })
+  }
+
   async function ensureVoice(mime: string): Promise<string> {
     if (voiceIdRef.current) return voiceIdRef.current
     // Meeting 模式:voice_id 在 /api/v1/mdt-meetings POST 时就由后端预生成,直接用 presetVoiceId
@@ -223,15 +250,30 @@ export default function Recorder({
       if (exists) {
         return prev.map((c) =>
           c.index === index
-            ? { ...c, status: 'uploading', attempts: attempt + 1, mime, bytes: blob.size }
+            ? {
+                ...c,
+                status: 'uploading',
+                attempts: attempt + 1,
+                mime,
+                bytes: blob.size,
+                uploadedBytes: 0,
+              }
             : c,
         )
       }
       return [
         ...prev,
-        { index, status: 'uploading', bytes: blob.size, attempts: attempt + 1, mime },
+        {
+          index,
+          status: 'uploading',
+          bytes: blob.size,
+          attempts: attempt + 1,
+          mime,
+          uploadedBytes: 0,
+        },
       ]
     })
+    setPhase(`正在上传第 ${index + 1} 片`)
 
     try {
       const form = new FormData()
@@ -248,12 +290,15 @@ export default function Recorder({
         form.append('session_id', sessionId!)
         endpoint = `${BASE}/api/v1/audio/chunk`
       }
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'X-Device-Id': getDeviceId() },
-        body: form,
+      await uploadForm(endpoint, form, (loaded, total) => {
+        setChunks((prev) =>
+          prev.map((c) =>
+            c.index === index
+              ? { ...c, uploadedBytes: Math.min(loaded, total || blob.size), bytes: total || blob.size }
+              : c,
+          ),
+        )
       })
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
 
       // 上传成功 — 删除本地 IndexedDB 缓存(节省空间)
       try {
@@ -261,8 +306,11 @@ export default function Recorder({
       } catch {}
 
       setChunks((prev) =>
-        prev.map((c) => (c.index === index ? { ...c, status: 'done' } : c)),
+        prev.map((c) =>
+          c.index === index ? { ...c, status: 'done', uploadedBytes: c.bytes } : c,
+        ),
       )
+      setPhase(recording ? '录音中,分片自动上传' : '分片上传中,等待全部完成')
       return true
     } catch (e: any) {
       console.warn(`chunk ${index} upload attempt ${attempt + 1} failed`, e)
@@ -271,7 +319,9 @@ export default function Recorder({
         const delay = RETRY_BACKOFF_MS[attempt] || 5000
         setChunks((prev) =>
           prev.map((c) =>
-            c.index === index ? { ...c, status: 'uploading', attempts: attempt + 1 } : c,
+            c.index === index
+              ? { ...c, status: 'uploading', attempts: attempt + 1, uploadedBytes: 0 }
+              : c,
           ),
         )
         await new Promise((r) => setTimeout(r, delay))
@@ -283,6 +333,7 @@ export default function Recorder({
       setError(
         `第 ${index + 1} 片上传失败 (${MAX_RETRIES} 次),已保存到本地。请点"重传失败片",或保持网络稳定后再点"完成"。`,
       )
+      setPhase('有分片上传失败')
       return false
     }
   }
@@ -339,6 +390,7 @@ export default function Recorder({
 
       await ensureVoice(actualMime)
       chunkIndexRef.current = 0
+      setPhase('录音中,分片自动上传')
 
       mr.ondataavailable = (e: BlobEvent) => {
         if (e.data && e.data.size > 0) {
@@ -452,6 +504,7 @@ export default function Recorder({
             bytes: p.size,
             attempts: 0,
             mime: p.mime,
+            uploadedBytes: 0,
           })),
       )
       // 把 orphans 列表删掉这一组
@@ -485,6 +538,7 @@ export default function Recorder({
     if (!voiceIdRef.current) return
     setFinalizing(true)
     setError(null)
+    setPhase('正在合并录音并转码')
     try {
       const chunkCount = chunkIndexRef.current
       let endpoint: string
@@ -523,9 +577,11 @@ export default function Recorder({
       } catch {}
       if (!isMeeting) {
         // 单 session 模式:立即触发 ASR
+        setPhase('录音已合并,正在提交转写')
         await api.triggerAsr(voiceIdRef.current)
       }
       // meeting 模式:父组件决定何时调 /finalize 触发 ASR+切分(可能需要二次确认)
+      setPhase(isMeeting ? '录音已合并,可开始 AI 切分' : '已提交转写,请查看实时进度')
       onFinished?.(voiceIdRef.current)
     } catch (e: any) {
       const msg = e?.message || String(e)
@@ -544,6 +600,25 @@ export default function Recorder({
   const okCount = chunks.filter((c) => c.status === 'done').length
   const uploadingCount = chunks.filter((c) => c.status === 'uploading').length
   const failedCount = chunks.filter((c) => c.status === 'failed').length
+  const totalBytes = chunks.reduce((sum, c) => sum + c.bytes, 0)
+  const uploadedBytes = chunks.reduce((sum, c) => {
+    if (c.status === 'done') return sum + c.bytes
+    return sum + Math.min(c.uploadedBytes || 0, c.bytes)
+  }, 0)
+  const uploadPercent = totalBytes > 0 ? Math.round((uploadedBytes / totalBytes) * 100) : 0
+  const uploadedMb = (uploadedBytes / 1024 / 1024).toFixed(1)
+  const totalMb = (totalBytes / 1024 / 1024).toFixed(1)
+  const displayPhase = finalizing
+    ? phase
+    : failedCount > 0
+    ? '有分片上传失败'
+    : uploadingCount > 0
+    ? phase
+    : chunks.length > 0 && okCount === chunks.length
+    ? isMeeting
+      ? '分片已上传,可完成录音'
+      : '分片已上传,可完成并转写'
+    : phase
 
   return (
     <div className="card space-y-3">
@@ -642,15 +717,25 @@ export default function Recorder({
             disabled={finalizing || uploadingCount > 0 || failedCount > 0}
             type="button"
           >
-            {finalizing ? '处理中…' : '完成并转写'}
+            {finalizing ? '处理中…' : isMeeting ? '完成录音' : '完成并转写'}
           </button>
         </div>
       )}
 
       {chunks.length > 0 && (
-        <div className="text-xs text-gray-600 space-y-1">
+        <div className="text-xs text-gray-600 space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <span className="truncate">{displayPhase}</span>
+            <span className="shrink-0 tabular-nums">{uploadPercent}%</span>
+          </div>
+          <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+            <div
+              className={`h-full transition-all ${failedCount > 0 ? 'bg-rose-500' : 'bg-brand-500'}`}
+              style={{ width: `${Math.min(100, Math.max(0, uploadPercent))}%` }}
+            />
+          </div>
           <div>
-            分片进度:{okCount}/{chunks.length} 已上传
+            分片进度:{okCount}/{chunks.length} 已上传 · {uploadedMb}/{totalMb} MB
             {uploadingCount > 0 && (
               <span className="text-amber-600 ml-2">{uploadingCount} 上传中</span>
             )}

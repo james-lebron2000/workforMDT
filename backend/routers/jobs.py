@@ -14,6 +14,7 @@ from models.voice import VoiceNote
 from routers._deps import current_user
 from routers.consent import require_consent
 from services.celery_app import celery_app
+from services.sse_publisher import publish
 
 router = APIRouter()
 
@@ -52,6 +53,13 @@ async def trigger_asr(
     if sess is None or sess.created_by != user.id:
         raise HTTPException(status_code=403, detail="forbidden")
     task = celery_app.send_task("tasks.asr_task", args=[voice_id], queue="asr")
+    publish(
+        str(voice.session_id),
+        "asr",
+        1,
+        "录音转写任务已提交,等待后台处理",
+        {"voice_id": voice_id, "task_id": task.id},
+    )
     return JobAck(ok=True, task_id=task.id)
 
 
