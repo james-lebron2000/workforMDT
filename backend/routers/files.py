@@ -15,6 +15,7 @@ from models.user import User
 from routers._deps import current_user
 from routers.consent import require_consent
 from services import minio_client
+from services.sse_publisher import publish_state, publish_user_state
 
 router = APIRouter()
 
@@ -58,9 +59,27 @@ async def presign_upload(
         ocr_status="pending",
     )
     db.add(record)
+    status_changed = False
     if sess.status == "draft":
         sess.status = "collecting"
+        status_changed = True
     await db.flush()
+
+    # 广播给同会话其他设备 / tab — 列表页和 upload 页都能即时刷新
+    publish_state(
+        payload.session_id,
+        "record_added",
+        record_id=record_id,
+        file_type=payload.file_type,
+        filename=safe_filename,
+    )
+    if status_changed:
+        publish_user_state(
+            user.id,
+            "session_status_changed",
+            session_id=payload.session_id,
+            status=sess.status,
+        )
 
     return PresignResponse(record_id=record_id, upload_url=url, file_key=key)
 

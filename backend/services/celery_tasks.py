@@ -44,6 +44,24 @@ def _publish(session_id: str, stage: str, percent: int, message: str, **extra: A
         logger.warning("publish_failed", error=str(e))
 
 
+def _publish_state(session_id: str, kind: str, **extra: Any) -> None:
+    """任务完成后通知所有订阅设备 refetch — 区别于进度事件,前端按 type==state 分流。"""
+    try:
+        sse_publisher.publish_state(session_id, kind, **extra)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("publish_state_failed", error=str(e))
+
+
+def _publish_user_state(user_id: str | None, kind: str, **extra: Any) -> None:
+    """同医生 cases 列表的实时刷新通知。user_id 为空时静默跳过。"""
+    if not user_id:
+        return
+    try:
+        sse_publisher.publish_user_state(user_id, kind, **extra)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("publish_user_state_failed", error=str(e))
+
+
 _MIME_BY_EXT = {
     "jpg": "image/jpeg",
     "jpeg": "image/jpeg",
@@ -167,6 +185,13 @@ def ocr_task(self, medical_record_id: str) -> Dict[str, Any]:
                 record_id=str(record.id),
                 n_pages=ocr_result.get("n_pages"),
             )
+            # 多端同步:其他设备在 upload 页/review 页拿到事件后 refetch,刷新 ocr_status=done
+            _publish_state(
+                session_id,
+                "record_updated",
+                record_id=str(record.id),
+                ocr_status="done",
+            )
             return {
                 "ok": True,
                 "record_id": str(record.id),
@@ -242,6 +267,13 @@ def asr_task(self, voice_note_id: str) -> Dict[str, Any]:
                 100,
                 f"录音转写完成({len(voice.transcript or [])} 段)",
                 voice_id=str(voice.id),
+            )
+            _publish_state(
+                session_id,
+                "voice_updated",
+                voice_id=str(voice.id),
+                voice_type=voice.voice_type,
+                asr_status="done",
             )
             return {"ok": True, "voice_id": str(voice.id)}
         except Exception as e:  # noqa: BLE001
@@ -356,6 +388,9 @@ def summary_task(self, session_id: str) -> Dict[str, Any]:
             db.commit()
 
             _publish(session_id, "summary", 100, "病史摘要已生成,请与患者核对")
+            _publish_state(
+                session_id, "summary_updated", version=next_version
+            )
             return {"ok": True, "version": next_version}
         except Exception as e:  # noqa: BLE001
             db.rollback()
@@ -554,6 +589,20 @@ def mdt_analysis_task(self, session_id: str) -> Dict[str, Any]:
                 100,
                 f"分析完成,QC {fr.qc_status}",
                 qc_issues=len(qc_report.issues),
+            )
+            _publish_state(
+                session_id,
+                "analysis_done",
+                qc_status=fr.qc_status,
+                qc_issues=len(qc_report.issues),
+                status=sess.status,
+            )
+            # 同医生 cases 列表里此病例的状态徽章自动更新到"待医生确认"
+            _publish_user_state(
+                getattr(sess, "created_by", None),
+                "session_status_changed",
+                session_id=session_id,
+                status=sess.status,
             )
 
             # 群组会议收尾:若本 session 隶属某 meeting,检查兄弟 session 是否全部 reviewing/completed,

@@ -39,7 +39,7 @@ from routers.consent import require_consent
 from services import minio_client
 from services.audio_transcode import TranscodeError, transcode_to_mp3
 from services.celery_app import celery_app
-from services.sse_publisher import publish, subscribe
+from services.sse_publisher import publish, publish_state, publish_user_state, subscribe
 from utils.logger import get_logger
 
 logger = get_logger("router.meetings")
@@ -229,6 +229,13 @@ async def create_meeting(
     )
     await db.flush()
 
+    publish_user_state(
+        user.id,
+        "meeting_created",
+        meeting_id=meeting.id,
+        session_count=len(payload.session_ids),
+    )
+
     members = await _members_payload(db, meeting)
     return MeetingOut(
         id=meeting.id,
@@ -353,6 +360,8 @@ async def delete_meeting(
             payload={"minio_files": n},
         )
     )
+    publish_state(meeting_id, "meeting_deleted")
+    publish_user_state(user.id, "meeting_deleted", meeting_id=meeting_id)
     return {"ok": True, "minio_files_removed": n}
 
 

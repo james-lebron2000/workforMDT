@@ -6,6 +6,7 @@ import { api, humanizeError } from '@/lib/api'
 import UploadDropzone from '@/components/UploadDropzone'
 import Recorder from '@/components/Recorder'
 import ProgressStream from '@/components/ProgressStream'
+import type { StateEvent } from '@/lib/sse'
 import { useToast } from '@/components/Toast'
 
 const STATUS_LABEL: Record<string, string> = {
@@ -51,14 +52,26 @@ export default function UploadPage() {
     reload()
   }, [sessionId, tick])
 
-  // 摘要生成中/任务进行时,每 5s 刷新一次
+  // 30s 兜底轮询 — SSE 才是主同步通道(ProgressStream onStateChange → reload),
+  // 这里只在 SSE 失联(NAT 杀连接 / 网络抖动重连失败)时保证最终一致。
+  // 老的"仅 collecting/analyzing 5s 轮"已被 SSE 全状态覆盖替代。
   useEffect(() => {
-    const status = data?.session?.status
-    if (status === 'collecting' || status === 'analyzing') {
-      const t = setInterval(() => setTick((x) => x + 1), 5000)
-      return () => clearInterval(t)
+    const t = setInterval(() => setTick((x) => x + 1), 30_000)
+    return () => clearInterval(t)
+  }, [])
+
+  // SSE 状态事件 → 触发 reload。session_deleted 特殊处理:跳回列表。
+  function onStateEvent(ev: StateEvent) {
+    if (ev.kind === 'session_deleted') {
+      toast.warn('该病例已被其他端删除')
+      router.push('/cases')
+      return
     }
-  }, [data?.session?.status])
+    // 其余 kind(record_added/record_updated/voice_updated/summary_updated/
+    // summary_confirmed/tnm_updated/opinion_updated/final_updated/
+    // field_updated/analysis_done) 一律 refetch
+    reload()
+  }
 
   const sess = data?.session
   const records: any[] = data?.records || []
@@ -170,7 +183,7 @@ export default function UploadPage() {
       </div>
 
       <div className="card">
-        <ProgressStream sessionId={sessionId} />
+        <ProgressStream sessionId={sessionId} onStateChange={onStateEvent} />
       </div>
 
       {/* 步骤 1:资料采集 */}

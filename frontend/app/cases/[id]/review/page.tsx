@@ -9,9 +9,12 @@ import EvidencePopover from '@/components/EvidencePopover'
 import TNMStageCard from '@/components/TNMStageCard'
 import DeptOpinionCard from '@/components/DeptOpinionCard'
 import QCBanner from '@/components/QCBanner'
+import type { StateEvent } from '@/lib/sse'
+import { useToast } from '@/components/Toast'
 
 export default function ReviewPage() {
   const router = useRouter()
+  const toast = useToast()
   const params = useParams() as { id: string }
   const sessionId = params.id
 
@@ -35,13 +38,21 @@ export default function ReviewPage() {
     reload()
   }, [sessionId, tick])
 
+  // 30s 兜底轮询 — SSE 是主同步通道(ProgressStream onStateChange → reload)
   useEffect(() => {
-    // 分析进行中时,每 5s 轮询一次
-    if (data?.session?.status === 'analyzing') {
-      const t = setInterval(() => setTick((x) => x + 1), 5000)
-      return () => clearInterval(t)
+    const t = setInterval(() => setTick((x) => x + 1), 30_000)
+    return () => clearInterval(t)
+  }, [])
+
+  // SSE 状态事件 → reload。其他端编辑/重生成/删除都在这里收到。
+  function onStateEvent(ev: StateEvent) {
+    if (ev.kind === 'session_deleted') {
+      toast.warn('该病例已被其他端删除')
+      router.push('/cases')
+      return
     }
-  }, [data?.session?.status])
+    reload()
+  }
 
   if (loading && !data) {
     return <div className="card text-center text-gray-500 py-8">加载中…</div>
@@ -78,10 +89,16 @@ export default function ReviewPage() {
         {sess.title || `MDT-${sess.patient?.code}`}
       </h1>
 
-      {sess.status === 'analyzing' && (
+      {sess.status === 'analyzing' ? (
         <div className="card">
           <h3 className="font-medium text-sm mb-2">🤖 AI 分析中</h3>
-          <ProgressStream sessionId={sessionId} />
+          <ProgressStream sessionId={sessionId} onStateChange={onStateEvent} />
+        </div>
+      ) : (
+        // 即便不在 analyzing 状态也订阅 SSE — 多端同步必备(其他端编辑会经此触发 reload)
+        // 但 UI 收起,只留细线状态条
+        <div className="px-1">
+          <ProgressStream sessionId={sessionId} onStateChange={onStateEvent} />
         </div>
       )}
 

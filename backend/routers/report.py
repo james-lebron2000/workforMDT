@@ -21,6 +21,7 @@ from models.tnm import TnmStaging
 from models.user import User
 from routers._deps import current_user
 from routers.consent import require_consent
+from services.sse_publisher import publish_state
 
 router = APIRouter()
 
@@ -101,6 +102,13 @@ async def edit_field(
         target_type="mdt_session", target_id=session_id,
         payload={"field": edit.field_path},
     ))
+    # 广播 — 其他端 review 页拿到事件后 refetch,即刻看到新值
+    publish_state(
+        session_id,
+        "field_updated",
+        field_path=edit.field_path,
+        editor_id=user.id,
+    )
     return {"ok": True}
 
 

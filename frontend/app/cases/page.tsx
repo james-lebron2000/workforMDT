@@ -1,11 +1,12 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { api, humanizeError } from '@/lib/api'
 import ConsentGate from '@/components/ConsentGate'
 import DoctorProfileGate from '@/components/DoctorProfileGate'
 import { useToast } from '@/components/Toast'
+import { subscribeUserStream, type ConnectionState } from '@/lib/sse'
 
 interface SessionItem {
   id: string
@@ -34,9 +35,46 @@ export default function CasesPage() {
   // 群组录音多选状态
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [startingMeeting, setStartingMeeting] = useState(false)
+  const [syncState, setSyncState] = useState<ConnectionState>('connecting')
+
+  // refetch 节流:同一医生同时在另一端做 5 个动作不应该触发 5 次拉取
+  const refetchTimerRef = useRef<number | null>(null)
+  function scheduleRefetch(immediate = false) {
+    if (refetchTimerRef.current) {
+      window.clearTimeout(refetchTimerRef.current)
+      refetchTimerRef.current = null
+    }
+    const delay = immediate ? 0 : 300
+    refetchTimerRef.current = window.setTimeout(() => {
+      refetchTimerRef.current = null
+      api.listSessions().then((d) => setList(d.sessions)).catch(console.error)
+    }, delay) as unknown as number
+  }
 
   useEffect(() => {
-    api.listSessions().then((d) => setList(d.sessions)).catch(console.error)
+    // 首次拉
+    scheduleRefetch(true)
+    // SSE 订阅 — 任何会话级/会议级变化都触发节流后 refetch
+    const unsub = subscribeUserStream({
+      onStateEvent: (ev) => {
+        // ev.kind 之一:session_created/session_deleted/session_status_changed
+        //              meeting_created/meeting_deleted/meeting_status_changed
+        // 一律 refetch;不细化优化,列表场景下数据量小、refetch ≤ 100ms
+        scheduleRefetch()
+      },
+      onState: (s) => setSyncState(s),
+      onError: () => {
+        // 静默 — onState 已经显示状态条;失败兜底由 fallback polling 接管
+      },
+    })
+    // SSE 兜底:30 秒一次的低频轮询;SSE 正常时是浪费但成本极低,
+    // SSE 进 'failed' 状态后这就是唯一的同步通道,绝不能砍。
+    const fallback = window.setInterval(() => scheduleRefetch(), 30_000)
+    return () => {
+      unsub()
+      window.clearInterval(fallback)
+      if (refetchTimerRef.current) window.clearTimeout(refetchTimerRef.current)
+    }
   }, [])
 
   async function onCreate(form: FormData) {
@@ -122,7 +160,10 @@ export default function CasesPage() {
     <ConsentGate>
     <div className="space-y-4 pb-24">
       <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold">病例列表</h1>
+        <div className="flex items-center gap-2">
+          <h1 className="text-lg font-semibold">病例列表</h1>
+          <SyncDot state={syncState} />
+        </div>
         <button className="btn btn-primary" onClick={() => setShowCreate(true)}>
           + 新建 MDT
         </button>
@@ -288,5 +329,24 @@ export default function CasesPage() {
     </div>
     </ConsentGate>
     </DoctorProfileGate>
+  )
+}
+
+// 多端同步状态指示器 — 让医生知道列表是不是实时的
+function SyncDot({ state }: { state: ConnectionState }) {
+  const map: Record<ConnectionState, { cls: string; title: string }> = {
+    connecting: { cls: 'bg-gray-300', title: '连接中…' },
+    open: { cls: 'bg-emerald-500', title: '实时同步中(其他端的操作会自动出现)' },
+    reconnecting: { cls: 'bg-amber-400 animate-pulse', title: '同步连接重连中,30 秒兜底轮询' },
+    closed: { cls: 'bg-gray-300', title: '同步已断开' },
+    failed: { cls: 'bg-rose-500', title: '实时同步失败,改用 30 秒轮询;刷新页面可重试' },
+  }
+  const m = map[state]
+  return (
+    <span
+      className={`inline-block w-2 h-2 rounded-full ${m.cls}`}
+      title={m.title}
+      aria-label={m.title}
+    />
   )
 }

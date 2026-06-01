@@ -1,6 +1,13 @@
-// SSE 客户端 - 订阅 /api/v1/sessions/{id}/progress
+// SSE 客户端 - 订阅 /api/v1/sessions/{id}/progress、/mdt-meetings/{id}/progress、/me/stream
 //
-// 设计目标:30 分钟 AI 分析过程中,医生网络抖动/页面切到后台都不应该丢进度。
+// 两种事件:
+//   1) 进度事件(老格式,无 type 字段):{stage, percent, message, ts, ...}
+//      Celery 任务推,UI 上展示进度条
+//   2) 状态事件(新格式,type:"state"):{type:"state", kind, session_id?, ts, ...}
+//      写操作端点 + 任务完成时推,触发 UI refetch
+//
+// 设计目标:30 分钟 AI 分析过程中,医生网络抖动/页面切到后台都不应该丢进度;
+// 同一医生在手机+电脑两个端同时打开,任一端的操作另一端 ≤1s 内可见。
 // - 指数退避重连(1s/3s/6s/12s/20s/30s,最多 6 次)
 // - visibilitychange visible 时立即重连(iOS Safari 切前台会复活 EventSource)
 // - readyState=CLOSED 才视为断;CONNECTING 不算
@@ -16,10 +23,29 @@ export interface ProgressEvent {
   [k: string]: any
 }
 
+export interface StateEvent {
+  type: 'state'
+  /** 事件类型 — 见后端 publish_state / publish_user_state 文档 */
+  kind: string
+  ts: number
+  session_id?: string
+  user_id?: string
+  meeting_id?: string
+  [k: string]: any
+}
+
+export type AnyEvent = ProgressEvent | StateEvent
+
+export function isStateEvent(ev: AnyEvent): ev is StateEvent {
+  return (ev as any)?.type === 'state'
+}
+
 export type ConnectionState = 'connecting' | 'open' | 'reconnecting' | 'closed' | 'failed'
 
 interface SubscribeOptions {
-  onMessage: (ev: ProgressEvent) => void
+  onMessage?: (ev: ProgressEvent) => void
+  /** 新:状态事件(refetch 触发器)*/
+  onStateEvent?: (ev: StateEvent) => void
   onError?: (e: any) => void
   onState?: (s: ConnectionState, attempt: number) => void
 }
@@ -53,6 +79,11 @@ export function subscribeMeetingProgress(
     optsOrOnMessage,
     legacyOnError,
   )
+}
+
+/** 用户级事件总线 — cases 列表页订阅,收 session_created/deleted/status_changed */
+export function subscribeUserStream(opts: SubscribeOptions): () => void {
+  return subscribeUrl(`/api/v1/me/stream`, opts)
 }
 
 function subscribeUrl(
@@ -91,8 +122,12 @@ function subscribeUrl(
     }
     es.onmessage = (e) => {
       try {
-        const data = JSON.parse(e.data)
-        opts.onMessage(data)
+        const data = JSON.parse(e.data) as AnyEvent
+        if (isStateEvent(data)) {
+          opts.onStateEvent?.(data)
+        } else {
+          opts.onMessage?.(data as ProgressEvent)
+        }
       } catch {
         // 后端心跳 / 注释行可能不是 JSON,忽略
       }

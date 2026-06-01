@@ -23,7 +23,7 @@ from models.voice import VoiceNote
 from routers._deps import current_user
 from routers.consent import require_consent
 from services import minio_client
-from services.sse_publisher import subscribe
+from services.sse_publisher import publish_state, publish_user_state, subscribe
 from utils.logger import get_logger
 
 logger = get_logger("router.sessions")
@@ -92,6 +92,13 @@ async def create_session(
         target_type="mdt_session", target_id=sess.id,
         payload={"patient_code": payload.patient.code},
     ))
+    # 广播给本医生其他设备 — cases 列表自动刷新出新病例
+    publish_user_state(
+        user.id,
+        "session_created",
+        session_id=sess.id,
+        patient_code=payload.patient.code,
+    )
     return SessionOut(
         id=sess.id,
         patient_id=patient.id,
@@ -304,6 +311,14 @@ async def confirm_summary(
         target_type="mdt_session", target_id=session_id,
         payload={"note": payload.note} if payload.note else None,
     ))
+    # 双广播:同会话其他设备(upload 页解锁步骤 3)+ 同医生 cases 列表
+    publish_state(session_id, "summary_confirmed", status=sess.status)
+    publish_user_state(
+        user.id,
+        "session_status_changed",
+        session_id=session_id,
+        status=sess.status,
+    )
     return {"ok": True, "status": sess.status}
 
 
@@ -364,6 +379,9 @@ async def delete_session(
         target_type="mdt_session", target_id=session_id,
         payload={"minio_files": n},
     ))
+    # 广播:同会话其他设备(若开着病例详情页,会跳回列表)+ 同医生 cases 列表
+    publish_state(session_id, "session_deleted")
+    publish_user_state(user.id, "session_deleted", session_id=session_id)
     return {"ok": True, "minio_files_removed": n}
 
 
